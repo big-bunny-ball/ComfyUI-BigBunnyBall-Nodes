@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+
+test_script_thonny.py
+PROJECT_MEMORY.md

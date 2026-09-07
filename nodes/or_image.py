@@ -1,7 +1,12 @@
 import os
-import requests
+import json
+import urllib.request
+import urllib.error
 from pathlib import Path
 import base64
+from folder_paths import get_output_directory
+
+from .catogory_list import CategoryList
 
 
 class ORImageGen:
@@ -38,7 +43,7 @@ class ORImageGen:
 
     RETURN_TYPES = ("STRING", )
     FUNCTION = "run_main"
-    CATEGORY = "MyOpenRouter"
+    CATEGORY = CategoryList.api_openrouter()
 
 
     def run_main(self, user_prompt, model, aspect_ratio, output_resolution, 
@@ -75,27 +80,30 @@ class ORImageGen:
         if reference_images:
             payload["input_references"] = reference_images
 
+        OPENROUTER_URL = "https://openrouter.ai/api/v1/images"
 
         # POST + Guard
-        response = requests.post(
-            "https://openrouter.ai/api/v1/images",
-            json=payload,
+        req = urllib.request.Request(
+            OPENROUTER_URL,
+            data=json.dumps(payload).encode("utf-8"),
             headers=headers,
-            timeout=180
+            method="POST"
         )
-
-        if response.status_code != 200:
-            raise Exception(f"Image request failed ({response.status_code}): {response.text}")
-    
+        try:
+            response = urllib.request.urlopen(req, timeout=180)
+        except urllib.error.HTTPError as err:
+            raise Exception(f"Image request failed ({err.code}): {err.read().decode('utf-8')}")
 
         ## UNPACKS!!!
-        data = response.json()
+        data = json.loads(response.read().decode("utf-8"))
+
         first = data["data"][0]
         b64_string = first["b64_json"]
         ext = first.get("media_type", "image/png").split("/")[-1]  # .split("/")[-1] turns "image/png" into "png"
 
         # save
-        out_dir = Path("test_outputs")
+        #out_dir = Path("test_outputs")
+        out_dir = Path(get_output_directory()) / "or_images"
         out_dir.mkdir(exist_ok=True)
         out_path = out_dir / f"generated.{ext}"
         with open(out_path, "wb") as file:

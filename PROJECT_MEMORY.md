@@ -2,6 +2,7 @@
 
 > Durable project state for this ComfyUI custom-nodes pack. Maintained by Hanako (since 2026-09-06).
 > Ingested from handoff doc `comfyui-node-tutoring-session.md` (2026-08-31) + live code inspection.
+> 2026-09-06 evening: stdlib urllib rewrite (zero deps), CategoryList registry, folder_paths output, loader-verified imports.
 
 ## Project Identity
 
@@ -27,7 +28,8 @@
 - Root `__init__.py` is the ONLY file ComfyUI requires at root — holds `NODE_CLASS_MAPPINGS` and `NODE_DISPLAY_NAME_MAPPINGS` dicts.
 - Subfolder layout: `nodes/` package (empty `__init__.py` marker), one module per concern (`or_text.py`, `or_image.py`).
 - Import style in root init: `from .nodes.<module> import <ClassName>`.
-- Class contract: `INPUT_TYPES()` classmethod → dict with `"required"` / `"optional"` sections; `RETURN_TYPES = (tuple,)` (trailing comma!); `FUNCTION = "method_name"`; `CATEGORY = "MyOpenRouter"`.
+- **Pack-internal imports must be RELATIVE** (`from .catogory_list import ...`). Absolute `from nodes.x import` works in Thonny (repo root on sys.path) but dies under ComfyUI's importlib loader — verified 2026-09-06 by loader simulation: `ModuleNotFoundError: No module named 'nodes'`.
+- Class contract: `INPUT_TYPES()` classmethod → dict with `"required"` / `"optional"` sections; `RETURN_TYPES = (tuple,)` (trailing comma!); `FUNCTION = "method_name"`; `CATEGORY = CategoryList.api_openrouter()` → `"API-OpenRouter"` (was `"MyOpenRouter"`).
 - Widget types: `STRING` (config: `multiline`, `default`), `FLOAT`/`INT` (config: `default`, `min`, `max`, `step`), dropdown = tuple whose **first element is a list of strings** (there is NO literal `"COMBO"` token — community jargon).
 - ComfyUI calls `FUNCTION` **synchronously** with kwargs; param NAMES are the contract, order is cosmetic. `async def` would return a coroutine and break the graph.
 - Widget-choice philosophy: STRING for open-ended, list for enums, INT/FLOAT+bounds for numeric ranges — make invalid input impossible, not merely rejected.
@@ -52,6 +54,7 @@
 - Other optional fields: `n` (1–10), `size` shorthand, `quality`, `output_format`, `background`, `output_compression`, `seed`, `stream` (SSE), `user`, `provider.*` routing.
 - Model discovery: `GET /api/v1/images/models` + per-endpoint records (`.../models/{slug}/endpoints`).
 - `qwen/qwen-image-3-pro` endpoint record: resolution {1K,2K}; aspect_ratio enum incl. 1:1/16:9/9:16/4:3/3:4 (+ extended); n 1–6; input_references 0–4; pricing $0.04 (1K output), $0.075 (2K output), $0.003 input_image.
+- `requests` IS in current ComfyUI core requirements.txt (verified) — but pack now uses stdlib `urllib` anyway → zero third-party deps; `requirements.txt` unnecessary.
 
 ## API Key Security Pattern (important)
 
@@ -84,6 +87,9 @@
 - Data-URL MIME label must match content (derive from suffix, fallback png).
 - `[]` for contract fields vs `.get()` chains for optional metadata; cost print must never crash a node after a successful billed generation.
 - Cross-agent review discipline: distinguish correctness claims (compiler/runtime decides) from style claims (judgment); check which code state each reviewer saw; verify with docs/compiler, not report confidence.
+- urllib HTTP: `urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=..., method="POST")` + `urlopen(req, timeout=N)`; non-200 raises `urllib.error.HTTPError` (`.code`, `.read()`) → catch and re-raise loudly. `import urllib.request` explicitly (submodules not auto-imported). SSL via system store, no certifi.
+- Absolute vs relative imports under importlib loaders; the cwd-on-sys.path illusion; loader-simulation pre-flight (spec_from_file_location + module_from_spec + exec_module).
+- Category registry pattern (single source of truth for CATEGORY strings); type annotations (`: str`, `-> str`).
 
 ## Current Code State (updated 2026-09-06)
 
@@ -91,25 +97,34 @@
 
 **`ORTextEcho`** — DONE.
 - Inputs: `text` (multiline, default "hello bigbunnyball"), `prefix` (single-line, default "router").
-- Returns `(f"{prefix}: {text}",)`. FUNCTION="run_text", CATEGORY="MyOpenRouter".
+- Returns `(f"{prefix}: {text}",)`. FUNCTION="run_text", CATEGORY via CategoryList = "API-OpenRouter".
 
 **`ORTextLLM`** — WORKING (live-tested in Thonny). Outstanding housekeeping:
+- Rewritten to stdlib urllib (2026-09-06); cost print uses `data["usage"]["cost"]` (`[]` is fine for chat — usage always present on chat endpoint).
 - Widget field named `your_api_key` — rename to `api_key` only if user asks (2026-09-06: user prefers keeping his field names).
 - `max_tokens` INT: user has set default=32000, min=8000, max=64000 (exceeds handoff's "raise to 8192" note — his call, acceptable).
 - Env var name `PERSONAL_OPENROUTER_TESTKEY` → rename to `OPENROUTER_API_KEY` before public.
 - Response handling: content/reasoning fallback + truncation flag — implemented.
 - Cost print — implemented.
-- Regression tests assigned (30 tokens → reasoning+truncation flag; 3000 → clean answer) — **NOT yet confirmed run**.
+- Regression tests assigned (30 tokens → reasoning+truncation flag; 3000 → clean answer) — **NOT yet confirmed run** (user now prefers in-graph testing).
 
 ### `nodes/or_image.py` — `ORImageGen` COMPLETE (built + reviewed 2026-09-06)
 
 - `INPUT_TYPES` required: `user_prompt` (multiline), `model` (default "qwen/qwen-image-3-pro"), `aspect_ratio` dropdown (1:1/16:9/9:16/4:3/3:4, default 16:9), `output_resolution` dropdown (1K/2K, default 1K).
 - `INPUT_TYPES` optional: `your_api_key` (default ""), `image_1..4` (each accepts https URL or local path, default "").
 - `to_data_url` is an instance method (`self` present). MIME label derived from `Path(ref).suffix.lower()` via ext_map (jpg/jpeg/webp), fallback png.
-- run_main: key guard (raise if missing) → headers → references loop (non-empty → data URL via to_data_url) → payload (`"prompt": user_prompt`, `"resolution": output_resolution` + conditional `input_references`) → POST timeout 180 → status guard (raise with response.text) → unpack (`data["data"][0]["b64_json"]`, ext via `first.get("media_type","image/png")`) → save `test_outputs/generated.{ext}` ("wb") → cost print defensive: `data.get("usage", {}).get("cost", "n/a")` → `return (str(out_path),)`.
-- `RETURN_TYPES = ("STRING",)`, `FUNCTION = "run_main"`, `CATEGORY = "MyOpenRouter"`.
+- run_main: key guard (raise if missing) → headers → references loop (non-empty → data URL via to_data_url) → payload (`"prompt": user_prompt`, `"resolution": output_resolution` + conditional `input_references`) → POST via urllib timeout 180 → HTTPError catch-and-reraise (raise with body) → unpack (`data["data"][0]["b64_json"]`, ext via `first.get("media_type","image/png")`) → save `ComfyUI/output/or_images/generated.{ext}` via `folder_paths.get_output_directory()` ("wb") → cost print defensive: `data.get("usage", {}).get("cost", "n/a")` → `return (str(out_path),)`.
+- `RETURN_TYPES = ("STRING",)`, `FUNCTION = "run_main"`, `CATEGORY` via CategoryList = "API-OpenRouter".
 - **User naming decisions are FINAL (2026-09-06):** keep `user_prompt`, `output_resolution`, `your_api_key`, `image_N` as-is. Do not suggest renames.
-- Pending: Thonny smoke tests + paid test runs (1K text-to-image ~$0.04, then local-PNG ref run ~$0.043).
+- File is ComfyUI-only (folder_paths import breaks Thonny) — accepted trade, user skips Thonny for paid calls.
+- Pending: NONE — **in-graph verified 2026-09-06: t2i (70.4s) and i2i (local-path ref) both succeed** in ComfyUI. Outputs land in `C:\Users\Tianyu He\ComfyUI-Shared\output\or_images\`. Known friction: fixed filename `generated.png` overwrites every run — timestamp fix offered.
+
+### `nodes/catogory_list.py` — CategoryList registry (NEW 2026-09-06)
+
+- Single source of truth for category names; `CategoryList.api_openrouter()` → "API-OpenRouter".
+- Method has no `self` (called on the class); `@staticmethod` suggested as the honest label. `__init__` = pass (dead attributes removed by user).
+- Filename typo "catogory_list" — git mv candidate (class name is correctly spelled).
+- Imported RELATIVELY from or_text.py / or_image.py.
 
 ### Root `__init__.py`
 - Registers all three nodes (2026-09-06): `ORTextEcho`, `ORTextLLM`, `ORImageGen`.
@@ -121,7 +136,8 @@
 
 ### `.gitignore`
 - Generic Python gitignore (from GitHub template).
-- **Pending additions**: `test_script_thonny.py`, `test_outputs/`.
+- Added by user (2026-09-06): `test_script_thonny.py`, `PROJECT_MEMORY.md`. NOTE: PROJECT_MEMORY.md is already tracked, so the ignore line has no effect until `git rm --cached` (user's call — the doc holds no secrets; keeping it tracked is fine).
+- No `test_outputs/` entry needed — images now go to `ComfyUI/output/or_images/`.
 
 ### `README.md` / `LICENSE`
 - README is a one-line pitch; needs real install/usage docs.
@@ -129,22 +145,24 @@
 
 ## Roadmap (ordered)
 
-1. ~~**Finish ORImageGen**~~ — DONE (2026-09-06). Thonny smoke tests + paid test runs next.
-2. **In-graph ComfyUI smoke test**: copy folder to custom_nodes, restart, wire all three nodes, run. Likely blocker: `ModuleNotFoundError: requests` in ComfyUI's embedded Python → fix with embedded-pip install. Screenshot empty-key field running graph as first README asset. **Adopt `folder_paths.get_output_directory()` absolute output here** (deferred from 2026-09-06 review: the folder_paths import breaks Thonny tests).
-3. **Git ceremony**: `requirements.txt` (one line: `requests`); .gitignore += `test_script_thonny.py`, `test_outputs/`; README install/usage docs; user commits+pushes.
+1. ~~**Finish ORImageGen**~~ — DONE. **In-graph verified 2026-09-06**: t2i + i2i both succeed (first paid runs in ComfyUI).
+2. **In-graph ComfyUI smoke test** — DONE for function (2026-09-06); remaining: screenshot empty-key red node as first README asset.
+3. **Git ceremony**: `requirements.txt` NO LONGER NEEDED (zero deps after urllib rewrite); README install/usage docs; user commits+pushes.
 4. **Housekeeping (only if user asks)**: env var rename `PERSONAL_OPENROUTER_TESTKEY` → `OPENROUTER_API_KEY` before public. Widget field names stay as user wrote them (2026-09-06 decision).
 5. **Stage 3 v2**: IMAGE tensor output (proper ComfyUI image socket) instead of path string.
 6. **Stage 4**: video models (async job + polling; 429 retry-with-backoff = first legit try/except).
 7. **Later**: wrap TE QA tools (seamless_fix, delattice_fix, flipbook_qa) as QA-gate nodes.
 
-## ComfyUI Install Path (unverified)
+## ComfyUI Install Path (verified 2026-09-06)
 
-- `D:\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\...` (exact custom_nodes path not yet confirmed — user copies files himself per teaching contract).
-- Embedded Python pip: `python_embeded\python.exe -m pip install requests`.
+- custom_nodes: `E:\Comfyui Installs\ComfyUI\ComfyUI\custom_nodes` (user-provided).
+- Actual output dir resolves to `C:\Users\Tianyu He\ComfyUI-Shared\output\` (shared output configured) — images under `or_images\`.
+- Embedded Python lives under the same tree; no pip installs needed — the pack has zero third-party deps.
 
 ## User Preferences Observed
 
 - Wants cost printed on every paid call.
 - Prefers understanding WHY — answer with the rule behind the rule.
 - Fine with being given full solutions when he asks to "digest", but only after attempting.
-- Codes in Thonny first (instant smoke tests without ComfyUI restart) — good pattern, encourage it.
+- Codes in Thonny first for free smoke tests (class introspection, no paid calls); paid calls go in-graph to save API credits (2026-09-06).
+- Wants copy-pasteable commit title/body for GitHub Desktop commits.

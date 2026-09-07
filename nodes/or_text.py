@@ -1,6 +1,9 @@
 import os
-import requests
+import json
+import urllib.request
+import urllib.error
 
+from .catogory_list import CategoryList
 
 class ORTextEcho:
 
@@ -15,7 +18,7 @@ class ORTextEcho:
 
     RETURN_TYPES = ("STRING",)
     FUNCTION = "run_text"
-    CATEGORY = "MyOpenRouter"
+    CATEGORY = CategoryList.api_openrouter()
 
 
     def run_text(self, prefix, text):      # params match INPUT_TYPES keys
@@ -39,7 +42,7 @@ class ORTextLLM:
 
     RETURN_TYPES = ("STRING", )
     FUNCTION = "run_main"
-    CATEGORY = "MyOpenRouter"
+    CATEGORY = CategoryList.api_openrouter()
 
 
     def run_main(self, your_api_key, system_prompt, user_prompt, model, temperature, max_tokens):
@@ -72,17 +75,34 @@ class ORTextLLM:
             "max_tokens": max_tokens
         }
 
-        # POST it
+        # # POST it
+        # OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+        # response = requests.post(OPENROUTER_URL, json=payload, headers=header, timeout=60)
+        # #print(response.text)
+
+        # # check status code
+        # if response.status_code != 200:
+        #     raise Exception(f"Request Unsuccessful: {response.text}")
+
+        # # parse response JSON
+        # data = response.json()
+
+        # Post it
         OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-        response = requests.post(OPENROUTER_URL, json=payload, headers=header, timeout=60)
-        #print(response.text)
+        req = urllib.request.Request(
+            OPENROUTER_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=header,
+            method="POST"
+        )
+        try:
+            response = urllib.request.urlopen(req, timeout=60)
+        except urllib.error.HTTPError as e:
+            raise Exception(f"Request Unsuccessful ({e.code}): {e.read().decode('utf-8')}")
 
-        # check status code
-        if response.status_code != 200:
-            raise Exception(f"Request Unsuccessful: {response.text}")
+        # Parse response json
+        data = json.loads(response.read().decode("utf-8"))
 
-        # parse response JSON
-        data = response.json()
         print(f"Cost: {data['usage']['cost']}")
 
         # response message - content and reasoning
