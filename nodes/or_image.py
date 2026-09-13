@@ -8,18 +8,26 @@ from folder_paths import get_output_directory
 
 from .catogory_list import CategoryList
 
+import io
+import numpy as np
+import torch
+from PIL import Image
+
 
 class ORImageGen:
 
-    def to_data_url(self, ref):  # Encode image to base64 data url
-        if ref.startswith("http"):
-            return ref
+    def tensor_to_data_url(self, tensor):  # (1,H,W,3) float 0-1 IMAGE tensor -> png data url
+        img = Image.fromarray((tensor[0].numpy() * 255).astype("uint8"))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
-        raw = Path(ref).read_bytes()  # read the ref images raw data
-        encoded = base64.b64encode(raw).decode()  # b64encode -> transform (byte) -> decode (byte -> string)
-        ext_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
-        mime = ext_map.get(Path(ref).suffix.lower(), "image/png")
-        return f"data:{mime};base64,{encoded}"
+
+    def image_to_tensor(self, b64_string):
+        buf = io.BytesIO(base64.b64decode(b64_string))
+        img = Image.open(buf).convert("RGB")
+        arr = np.array(img).astype("float32") / 255.0
+        return torch.from_numpy(arr).unsqueeze(0)
 
 
     @classmethod
@@ -33,21 +41,22 @@ class ORImageGen:
             },
             "optional": {
                 "your_api_key": ("STRING", {"multiline": False, "default": ""}),
-                "image_1": ("STRING", {"multiline": False, "default": ""}),  # Image as image URL or local path - single string
-                "image_2": ("STRING", {"multiline": False, "default": ""}),
-                "image_3": ("STRING", {"multiline": False, "default": ""}),
-                "image_4": ("STRING", {"multiline": False, "default": ""})   
+                "image_1": ("IMAGE",),
+                "image_2": ("IMAGE",),
+                "image_3": ("IMAGE",),
+                "image_4": ("IMAGE",)
             }
         }
 
 
-    RETURN_TYPES = ("STRING", )
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("image", "path")
     FUNCTION = "run_main"
     CATEGORY = CategoryList.api_openrouter()
 
 
     def run_main(self, user_prompt, model, aspect_ratio, output_resolution, 
-                 your_api_key, image_1, image_2, image_3, image_4):
+                 your_api_key, image_1=None, image_2=None, image_3=None, image_4=None):
 
         # check if api key presented
         your_api_key = your_api_key or os.environ.get("PERSONAL_OPENROUTER_TESTKEY")
@@ -63,10 +72,10 @@ class ORImageGen:
         # build reference images
         reference_images = []
         for img in (image_1, image_2, image_3, image_4):
-            if img:
+            if img is not None:
                 reference_images.append({
                     "type": "image_url",
-                    "image_url": {"url": self.to_data_url(img)}
+                    "image_url": {"url": self.tensor_to_data_url(img)}
                 })
 
         # build body payload
@@ -113,6 +122,7 @@ class ORImageGen:
         cost = data.get("usage", {}).get("cost", "n/a")
         print(f"Cost: {cost}")
 
-        return(str(out_path),)
+        image_tensor = self.image_to_tensor(b64_string)
+        return(image_tensor, str(out_path),)
 
         

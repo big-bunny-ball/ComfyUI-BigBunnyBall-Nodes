@@ -2,6 +2,11 @@ import os
 import json
 import urllib.request
 import urllib.error
+import base64
+import io
+
+import numpy as np
+from PIL import Image
 
 from .catogory_list import CategoryList
 
@@ -27,6 +32,12 @@ class ORTextEcho:
 
 class ORTextLLM:
 
+    def tensor_to_data_url(self, tensor):  # (1,H,W,3) float 0-1 IMAGE tensor -> png data url
+        img = Image.fromarray((tensor[0].numpy() * 255).astype("uint8"))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -37,6 +48,14 @@ class ORTextLLM:
                 "model": ("STRING", {"multiline": False, "default": "qwen/qwen3.7-flash"}),
                 "temperature": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
                 "max_tokens": ("INT", {"default": 32000, "min": 8000, "max": 64000})
+            },
+            "optional": {
+                "image_1": ("IMAGE",),
+                "image_2": ("IMAGE",),
+                "image_3": ("IMAGE",),
+                "image_4": ("IMAGE",),
+                "image_5": ("IMAGE",),
+                "image_6": ("IMAGE",)
             }
         }
 
@@ -45,7 +64,8 @@ class ORTextLLM:
     CATEGORY = CategoryList.api_openrouter()
 
 
-    def run_main(self, your_api_key, system_prompt, user_prompt, model, temperature, max_tokens):
+    def run_main(self, your_api_key, system_prompt, user_prompt, model, temperature, max_tokens,
+                 image_1=None, image_2=None, image_3=None, image_4=None, image_5=None, image_6=None):
 
         # get api key from env
         api_key = your_api_key or os.environ.get("PERSONAL_OPENROUTER_TESTKEY")
@@ -58,6 +78,18 @@ class ORTextLLM:
             "Content-Type": "application/json"
         }
 
+        # build user message: plain text, or multipart (text first, then images) per docs
+        images = [t for t in (image_1, image_2, image_3, image_4, image_5, image_6) if t is not None]
+        if images:
+            user_content = [{"type": "text", "text": user_prompt}]
+            for t in images:
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": self.tensor_to_data_url(t)}
+                })
+        else:
+            user_content = user_prompt
+
         # build body payload dict
         payload = {
             "model": model,
@@ -68,7 +100,7 @@ class ORTextLLM:
                 },
                 {
                     "role": "user",
-                    "content": user_prompt
+                    "content": user_content
                 }
             ],
             "temperature": temperature,

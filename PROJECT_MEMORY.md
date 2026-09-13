@@ -3,6 +3,7 @@
 > Durable project state for this ComfyUI custom-nodes pack. Maintained by Hanako (since 2026-09-06).
 > Ingested from handoff doc `comfyui-node-tutoring-session.md` (2026-08-31) + live code inspection.
 > 2026-09-06 evening: stdlib urllib rewrite (zero deps), CategoryList registry, folder_paths output, loader-verified imports.
+> 2026-09-12: IMAGE tensor I/O milestone — ORImageGen tensor output + 4 tensor reference inputs (path widgets removed by user decision); ORTextLLM vision (6 optional IMAGE inputs). Pre-flight verified via loader sim + intercepted HTTP, zero credits.
 
 ## Project Identity
 
@@ -56,6 +57,16 @@
 - `qwen/qwen-image-3-pro` endpoint record: resolution {1K,2K}; aspect_ratio enum incl. 1:1/16:9/9:16/4:3/3:4 (+ extended); n 1–6; input_references 0–4; pricing $0.04 (1K output), $0.075 (2K output), $0.003 input_image.
 - `requests` IS in current ComfyUI core requirements.txt (verified) — but pack now uses stdlib `urllib` anyway → zero third-party deps; `requirements.txt` unnecessary.
 
+### 2026-09-12 verification: chat vision inputs (image understanding)
+
+- Docs: `https://openrouter.ai/docs/guides/overview/multimodal/image-understanding`.
+- Vision goes through `/api/v1/chat/completions` with a **multi-part `messages` content array**: `{"type":"text","text":...}` + `{"type":"image_url","image_url":{"url":...}}` entries. Same `image_url` shape as the images endpoint's `input_references`.
+- `url` accepts a public https URL **or** a base64 data URL. Supported content types: `image/png`, `image/jpeg`, `image/webp`, `image/gif`.
+- **Docs explicitly recommend text part FIRST, then images** (parsing order); if images must lead, put them in the system prompt.
+- Max images per request varies per provider/model — no universal cap.
+- Vision requires a vision-capable model; `qwen/qwen3.7-flash` (ORTextLLM's default) NOT verified for image support — if unsupported, the provider 4xx surfaces via the HTTPError guard (fail-loud).
+- Image input tokens are billed (~$0.003/input image on the qwen endpoint family) → shows in the cost print.
+
 ## API Key Security Pattern (important)
 
 - Optional `api_key` STRING widget, default `""`.
@@ -90,8 +101,17 @@
 - urllib HTTP: `urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=..., method="POST")` + `urlopen(req, timeout=N)`; non-200 raises `urllib.error.HTTPError` (`.code`, `.read()`) → catch and re-raise loudly. `import urllib.request` explicitly (submodules not auto-imported). SSL via system store, no certifi.
 - Absolute vs relative imports under importlib loaders; the cwd-on-sys.path illusion; loader-simulation pre-flight (spec_from_file_location + module_from_spec + exec_module).
 - Category registry pattern (single source of truth for CATEGORY strings); type annotations (`: str`, `-> str`).
+- ComfyUI IMAGE contract: torch tensor `(B, H, W, C)` channels-LAST, float32, values 0–1; B = batch (single image = batch of 1); `.convert("RGB")` enforces C=3.
+- b64 → tensor chain: `b64decode` → `io.BytesIO` (in-memory file-like, duck-typed like `open()`) → `Image.open().convert("RGB")` → `np.array().astype("float32") / 255.0` → `torch.from_numpy().unsqueeze(0)`. **astype BEFORE divide** — dividing uint8 first promotes to float64 (off-contract, VAE rejects).
+- Reverse chain (tensor → data URL): `tensor[0]` drops batch dim → `* 255` + `astype("uint8")` → PIL `save(buf, format="PNG")` → b64 data URL. MIME hardcoded is CORRECT here (we chose the format; label can't lie). NOTE: this supersedes the old derive-MIME-from-suffix lesson — `to_data_url` (local-file refs) was deleted 2026-09-12 when inputs became tensors.
+- `torch.from_numpy` shares the numpy buffer (no copy). `bool()` of a multi-element tensor is ambiguous (PyTorch raises/warns) → optional tensor inputs must be guarded with `is not None`, never truthiness.
+- Optional INPUT_TYPES entries are passed as kwargs ONLY when wired → matching `=None` defaults on the FUNCTION signature, or unwired calls TypeError.
+- `RETURN_TYPES` order is POSITIONAL (maps to sockets); `RETURN_NAMES` labels the pins.
+- OpenRouter chat multipart content: conditional list-vs-string `content` (text part first) — same conditional-payload pattern as `input_references`.
+- Case-sensitivity trap: `from PIL import image` (lowercase) raises ImportError even on case-insensitive Windows — Pillow lazy-loads names case-sensitively through `__all__`. Kills the WHOLE pack at import (all nodes vanish), same failure class as the absolute-import landmine.
+- Intercepted-HTTP functional testing: monkeypatch `urllib.request.Request`/`urlopen` in a loader-sim harness → call the real `run_main` with fake keys/fake tensors, capture and assert the exact JSON payload. Proves branch logic (multipart vs plain, refs vs no refs) with zero network and zero credits. Harnesses live in agent workspace scratch, NOT the repo.
 
-## Current Code State (updated 2026-09-06)
+## Current Code State (updated 2026-09-12)
 
 ### `nodes/or_text.py` — two classes
 
@@ -107,17 +127,19 @@
 - Response handling: content/reasoning fallback + truncation flag — implemented.
 - Cost print — implemented.
 - Regression tests assigned (30 tokens → reasoning+truncation flag; 3000 → clean answer) — **NOT yet confirmed run** (user now prefers in-graph testing).
+- **Vision inputs (2026-09-12, user-requested build):** six optional `image_1..6` IMAGE tensor inputs (`=None` defaults on run_main); new helper `tensor_to_data_url` (PNG data URL); when any image wired, user message content becomes multipart list `[{"type":"text",...}, {"type":"image_url","image_url":{"url":...}}, ...]` (text FIRST per docs), else stays plain string — original text-only behaviour untouched. Functional-tested via intercepted HTTP (parts/text-first/plain-string branches all verified). NOT yet tested in-graph; needs a vision-capable model set in the widget.
 
-### `nodes/or_image.py` — `ORImageGen` COMPLETE (built + reviewed 2026-09-06)
+### `nodes/or_image.py` — `ORImageGen` COMPLETE + TENSOR UPGRADE BUILT (2026-09-12, pending in-graph test)
 
 - `INPUT_TYPES` required: `user_prompt` (multiline), `model` (default "qwen/qwen-image-3-pro"), `aspect_ratio` dropdown (1:1/16:9/9:16/4:3/3:4, default 16:9), `output_resolution` dropdown (1K/2K, default 1K).
-- `INPUT_TYPES` optional: `your_api_key` (default ""), `image_1..4` (each accepts https URL or local path, default "").
-- `to_data_url` is an instance method (`self` present). MIME label derived from `Path(ref).suffix.lower()` via ext_map (jpg/jpeg/webp), fallback png.
-- run_main: key guard (raise if missing) → headers → references loop (non-empty → data URL via to_data_url) → payload (`"prompt": user_prompt`, `"resolution": output_resolution` + conditional `input_references`) → POST via urllib timeout 180 → HTTPError catch-and-reraise (raise with body) → unpack (`data["data"][0]["b64_json"]`, ext via `first.get("media_type","image/png")`) → save `ComfyUI/output/or_images/generated.{ext}` via `folder_paths.get_output_directory()` ("wb") → cost print defensive: `data.get("usage", {}).get("cost", "n/a")` → `return (str(out_path),)`.
-- `RETURN_TYPES = ("STRING",)`, `FUNCTION = "run_main"`, `CATEGORY` via CategoryList = "API-OpenRouter".
+- `INPUT_TYPES` optional: `your_api_key` (default ""), `image_1..4` — **now IMAGE tensor sockets** (2026-09-12, user decision: tensors ONLY, no local paths/URLs; old STRING path widgets deleted along with `to_data_url` and its ext_map MIME logic). `run_main` has `image_1=None..image_4=None` defaults; loop guard is `is not None` (never truthiness on tensors).
+- `tensor_to_data_url` (instance method): `tensor[0]` → `*255`+`astype("uint8")` → PNG into BytesIO → `data:image/png;base64,...`. Sends FIRST FRAME ONLY of B>1 batches — deliberate simplification (LoadImage is B=1).
+- run_main: key guard (raise if missing) → headers → references loop (wired tensors → data URL) → payload (`"prompt": user_prompt`, `"resolution": output_resolution` + conditional `input_references`) → POST via urllib timeout 180 → HTTPError catch-and-reraise (raise with body) → unpack (`data["data"][0]["b64_json"]`, ext via `first.get("media_type","image/png")`) → save `ComfyUI/output/or_images/generated.{ext}` via `folder_paths.get_output_directory()` ("wb") → cost print defensive: `data.get("usage", {}).get("cost", "n/a")`.
+- **TENSOR OUTPUT (2026-09-12):** `image_to_tensor(b64_string)` helper (BytesIO → `Image.open().convert("RGB")` → `astype("float32")/255.0` → `from_numpy().unsqueeze(0)` → `(1,H,W,3)`); `RETURN_TYPES = ("IMAGE", "STRING")`, `RETURN_NAMES = ("image", "path")`, returns `(image_tensor, str(out_path),)` — tensor first, positional. `FUNCTION = "run_main"`, `CATEGORY` via CategoryList = "API-OpenRouter". Disk save KEPT for now (possible dup with downstream SaveImage — user's author call later).
 - **User naming decisions are FINAL (2026-09-06):** keep `user_prompt`, `output_resolution`, `your_api_key`, `image_N` as-is. Do not suggest renames.
-- File is ComfyUI-only (folder_paths import breaks Thonny) — accepted trade, user skips Thonny for paid calls.
-- Pending: NONE — **in-graph verified 2026-09-06: t2i (70.4s) and i2i (local-path ref) both succeed** in ComfyUI. Outputs land in `C:\Users\Tianyu He\ComfyUI-Shared\output\or_images\`. Known friction: fixed filename `generated.png` overwrites every run — timestamp fix offered.
+- New top imports (2026-09-12): `io`, `numpy as np`, `torch`, `from PIL import Image` (CAPITAL I — lowercase import kills the whole pack, Pillow lazy-loader is case-sensitive). All exist in ComfyUI embedded Python. File remains ComfyUI-only (folder_paths) — accepted trade.
+- **Verified 2026-09-12 pre-flight (loader sim + intercepted HTTP, zero credits):** pack loads; INPUT_TYPES image_1..4 all IMAGE; t2i branch omits `input_references`; i2i branch sends N refs with per-tensor pixels intact; returns 2-tuple; output file written. **NOT yet verified in-graph with a real paid run.**
+- v1 in-graph history (2026-09-06, path-string era): t2i (70.4s) and i2i (local-path ref) both succeeded. Outputs land in `C:\Users\Tianyu He\ComfyUI-Shared\output\or_images\`. Known friction: fixed filename `generated.png` overwrites every run — timestamp fix offered 2026-09-06, **DECLINED by user 2026-09-12** (do not re-offer unless asked).
 
 ### `nodes/catogory_list.py` — CategoryList registry (NEW 2026-09-06)
 
@@ -125,6 +147,7 @@
 - Method has no `self` (called on the class); `@staticmethod` suggested as the honest label. `__init__` = pass (dead attributes removed by user).
 - Filename typo "catogory_list" — git mv candidate (class name is correctly spelled).
 - Imported RELATIVELY from or_text.py / or_image.py.
+- NOTE (2026-09-12): `tensor_to_data_url` is duplicated verbatim in or_text.py and or_image.py — flagged to user; DRY candidate for a future `nodes/utils.py` (or broadened registry module) when a third node needs it. Not done — user's call.
 
 ### Root `__init__.py`
 - Registers all three nodes (2026-09-06): `ORTextEcho`, `ORTextLLM`, `ORImageGen`.
@@ -147,11 +170,11 @@
 
 1. ~~**Finish ORImageGen**~~ — DONE. **In-graph verified 2026-09-06**: t2i + i2i both succeed (first paid runs in ComfyUI).
 2. **In-graph ComfyUI smoke test** — DONE for function (2026-09-06); remaining: screenshot empty-key red node as first README asset.
-3. **Git ceremony**: `requirements.txt` NO LONGER NEEDED (zero deps after urllib rewrite); README install/usage docs; user commits+pushes.
+3. **Git ceremony**: `requirements.txt` NO LONGER NEEDED (zero deps after urllib rewrite); README install/usage docs; user commits+pushes. Commits so far: 3aaf432 (ORImageGen v1), 2f46830 (urllib+registry), + 2026-09-12 tensor I/O commit (title/body supplied).
 4. **Housekeeping (only if user asks)**: env var rename `PERSONAL_OPENROUTER_TESTKEY` → `OPENROUTER_API_KEY` before public. Widget field names stay as user wrote them (2026-09-06 decision).
-5. **Stage 3 v2**: IMAGE tensor output (proper ComfyUI image socket) instead of path string.
+5. ~~**Stage 3 v2**: IMAGE tensor output~~ — BUILT 2026-09-12 (tensor out + tensor refs in + ORTextLLM vision), pre-flight verified; **remaining: in-graph paid test** — ORImageGen→PreviewImage, LoadImage→ORTextLLM (vision-capable model!), ORImageGen→ORImageGen i2i chain. Timestamp filename fix DECLINED by user (2026-09-12) — don't re-offer.
 6. **Stage 4**: video models (async job + polling; 429 retry-with-backoff = first legit try/except).
-7. **Later**: wrap TE QA tools (seamless_fix, delattice_fix, flipbook_qa) as QA-gate nodes.
+7. **Later**: wrap TE QA tools (seamless_fix, delattice_fix, flipbook_qa) as QA-gate nodes; possible `nodes/utils.py` for the duplicated `tensor_to_data_url`.
 
 ## ComfyUI Install Path (verified 2026-09-06)
 
@@ -166,3 +189,7 @@
 - Fine with being given full solutions when he asks to "digest", but only after attempting.
 - Codes in Thonny first for free smoke tests (class introspection, no paid calls); paid calls go in-graph to save API credits (2026-09-06).
 - Wants copy-pasteable commit title/body for GitHub Desktop commits.
+- **Prefers COMPACT step-by-step guides over long concept essays** (2026-09-12: "its too massive... can you just give me step by step script guide&explanation?") — numbered steps, minimal code, one-line whys.
+- Sometimes asks the AI to implement directly ("please check... and make sure X can also take image tensor") — direct-build requests override code-unaided-first for that specific feature; still explain changes after.
+- **Tensor sockets over file-path widgets** (2026-09-12, explicit: "I dont want the local file path. I just want image tensor inputs") — graph-native wiring is his design direction.
+- Declined the timestamped-filename fix (2026-09-12) — accepts `generated.png` overwrite behaviour; do not re-offer.
