@@ -5,3 +5,6 @@ class CategoryList:
 
     def api_openrouter() -> str:
         return "API-OpenRouter"
+
+    def api_atlas() -> str:
+        return "API-AtlasCloud"
